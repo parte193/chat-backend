@@ -15,11 +15,24 @@ dotenv.config();
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: process.env.CORS_ORIGIN || "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 5e6,
+  cors: {
+    origin: [
+      process.env.CORS_ORIGIN,
+      process.env.CORS_TEST
+    ],
+    methods: ["GET", "POST"]
+  },
+  maxHttpBufferSize: 5e6
 });
 
-app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
+app.use(cors({
+  origin: [
+    process.env.CORS_ORIGIN,
+    process.env.CORS_TEST
+  ],
+  methods: ["GET", "POST"],
+  credentials: true
+}));
 app.use(express.json({ limit: "5mb" }));
 
 // ===================================
