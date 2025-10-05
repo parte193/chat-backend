@@ -3,27 +3,13 @@ import Message from "../models/Message.js";
 
 const router = Router();
 
+// 🔹 Obtener todos los mensajes (solo para pruebas)
 router.get("/", async (_req, res) => {
   try {
-    const msgs = await Message.find().sort({ timestamp: 1 }).lean();
-    res.json(msgs);
-  } catch (err) {
-    console.error("GET /api/messages error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-router.post("/", async (req, res) => {
-  try {
-    const { sender, content } = req.body;
-    if (!sender || !content) {
-      return res.status(400).json({ error: "sender y content son requeridos" });
-    }
-    const msg = await Message.create({ sender, content });
-    res.status(201).json(msg);
-  } catch (err) {
-    console.error("POST /api/messages error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    const messages = await Message.find().sort({ createdAt: 1 });
+    res.json(messages);
+  } catch (error) {
+    res.status(500).json({ error: "Error al obtener mensajes" });
   }
 });
 
