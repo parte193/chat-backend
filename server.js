@@ -182,4 +182,7 @@ io.on("connection", (socket) => {
 // 🔹 Iniciar servidor
 // ===================================
 const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => console.log(`✅ Servidor activo en puerto ${PORT}`));
+
+server.listen(PORT, () => {
+  console.log(`Servidor escuchando en el puerto ${PORT}`);
+});
