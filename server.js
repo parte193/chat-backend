@@ -14,30 +14,31 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: [
-      process.env.CORS_ORIGIN,
-      process.env.CORS_TEST
-    ],
-    methods: ["GET", "POST"]
-  },
-  maxHttpBufferSize: 5e6
-});
 
+// ================================
+// 🔹 Configuración de CORS
+// ================================
+const allowedOrigins = [
+  process.env.CORS_ORIGIN, // Producción
+  process.env.CORS_TEST    // Local
+].filter(Boolean); // elimina undefined
+
+// Middleware de CORS para Express
 app.use(cors({
-  origin: [
-    process.env.CORS_ORIGIN,
-    process.env.CORS_TEST
-  ],
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true); // Postman, curl o server-side requests
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error("CORS no permitido"));
+  },
   methods: ["GET", "POST"],
   credentials: true
 }));
+
 app.use(express.json({ limit: "5mb" }));
 
-// ===================================
+// ================================
 // 🔹 Conexión a MongoDB
-// ===================================
+// ================================
 mongoose
   .connect(process.env.MONGO_URI)
   .then(async () => {
@@ -57,17 +58,29 @@ mongoose
   })
   .catch((err) => console.error("🔴 Error conectando a MongoDB:", err));
 
-// ===================================
+// ================================
 // 🔹 Rutas REST
-// ===================================
+// ================================
 app.use("/api/messages", messagesRouter);
 app.use("/api/spaces", spacesRouter);
 
 app.get("/", (_req, res) => res.send("Servidor de chat funcionando 🚀"));
 
-// ===================================
-// 🔹 Socket.io
-// ===================================
+// ================================
+// 🔹 Socket.IO con CORS
+// ================================
+const io = new Server(server, {
+  cors: {
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      callback(new Error("CORS no permitido"));
+    },
+    methods: ["GET", "POST"]
+  },
+  maxHttpBufferSize: 5e6
+});
+
 const connectedUsers = new Map();
 
 const getUsersInSpace = (space) =>
@@ -191,9 +204,9 @@ io.on("connection", (socket) => {
   });
 });
 
-// ===================================
+// ================================
 // 🔹 Iniciar servidor
-// ===================================
+// ================================
 const PORT = process.env.PORT || 4000;
 
 server.listen(PORT, () => {
