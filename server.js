@@ -5,294 +5,223 @@ import cors from "cors";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
 
-import messagesRouter from "./routes/messages.js";
-import spacesRouter from "./routes/spaces.js";
 import Message from "./models/Message.js";
 import Space from "./models/Space.js";
+import messagesRouter from "./routes/messages.js";
+import spacesRouter from "./routes/spaces.js";
 
 dotenv.config();
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin);
-  }
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
-
 const app = express();
 const server = http.createServer(app);
-
-const allowedOrigins = [
-  process.env.CORS_ORIGIN,
-  process.env.CORS_TEST,
-].filter(Boolean);
-
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: process.env.CORS_ORIGIN || "*",
     methods: ["GET", "POST"],
-    credentials: true
   },
-  maxHttpBufferSize: 5e6
+  maxHttpBufferSize: 5e6, // 5MB
 });
 
-app.use(cors({ 
-  origin: allowedOrigins,
-  credentials: true 
-}));
-app.use(express.json({ limit: '5mb' }));
+// Middleware
+app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
+app.use(express.json({ limit: "5mb" }));
 
+// MongoDB
 mongoose
   .connect(process.env.MONGO_URI)
-  .then(() => console.log("🟢 Conectado a MongoDB Atlas"))
+  .then(async () => {
+    console.log("🟢 Conectado a MongoDB Atlas");
+
+    // Crear espacio general si no existe
+    const exists = await Space.findOne({ name: "general" });
+    if (!exists) {
+      await Space.create({
+        name: "general",
+        description: "Espacio general por defecto",
+        createdBy: "sistema",
+        isDefault: true,
+      });
+      console.log("✅ Espacio 'general' creado automáticamente");
+    }
+  })
   .catch((err) => console.error("🔴 Error conectando a MongoDB:", err));
 
+// Rutas API
 app.use("/api/messages", messagesRouter);
 app.use("/api/spaces", spacesRouter);
+
+// Test
 app.get("/", (_req, res) => res.send("Servidor de chat funcionando 🚀"));
 
-const connectedUsers = new Map();
+// ==========================================
+// SOCKET.IO CONFIGURACIÓN
+// ==========================================
+
+const connectedUsers = new Map(); // socket.id -> {nickname, space, isDM}
 
 const getUsersInSpace = (space) => {
-  const users = [];
-  connectedUsers.forEach((user, socketId) => {
-    if (user.space === space && !user.isDM) {
-      users.push({ socketId, nickname: user.nickname });
-    }
-  });
-  return users;
+  return Array.from(connectedUsers.entries())
+    .filter(([_, user]) => user.space === space && !user.isDM)
+    .map(([socketId, user]) => ({ socketId, nickname: user.nickname }));
 };
 
 const getAllConnectedUsers = () => {
-  const users = [];
-  const seen = new Set();
+  const unique = new Set();
+  const list = [];
   connectedUsers.forEach((user) => {
-    if (!seen.has(user.nickname)) {
-      users.push({ nickname: user.nickname });
-      seen.add(user.nickname);
+    if (!unique.has(user.nickname)) {
+      unique.add(user.nickname);
+      list.push({ nickname: user.nickname });
     }
   });
-  return users;
+  return list;
 };
 
-io.on("connection", async (socket) => {
+// ==========================================
+// EVENTOS DE SOCKET.IO
+// ==========================================
+io.on("connection", (socket) => {
   console.log("🟢 Usuario conectado:", socket.id);
 
-  socket.on("join", async ({ nickname, space = 'general' }) => {
+  // ========================
+  // JOIN (Unirse al espacio)
+  // ========================
+  socket.on("join", async ({ nickname, space = "general" }) => {
     connectedUsers.set(socket.id, { nickname, space, isDM: false });
     socket.join(space);
-    
+
     console.log(`👤 ${nickname} se unió al espacio: ${space}`);
-    
+
     io.to(space).emit("spaceUsers", getUsersInSpace(space));
     io.emit("allUsers", getAllConnectedUsers());
-    
-    try {
-      const history = await Message.find({ type: 'space', space })
-        .sort({ createdAt: 1 })
-        .lean();
-      
-      const historyWithTimestamp = history.map(msg => ({
-        ...msg,
-        timestamp: msg.createdAt || new Date().toISOString()
-      }));
-      
-      socket.emit("chatHistory", historyWithTimestamp);
-      console.log(`📦 Enviando ${history.length} mensajes del espacio ${space}`);
-    } catch (e) {
-      console.error("❌ Error enviando historial:", e);
-    }
-    
-    socket.to(space).emit("userJoined", { nickname, timestamp: new Date().toISOString() });
+
+    // Enviar historial del espacio
+    const history = await Message.find({ type: "space", space }).sort({
+      createdAt: 1,
+    });
+    socket.emit("chatHistory", history);
   });
 
+  // ========================
+  // CAMBIO DE ESPACIO
+  // ========================
   socket.on("changeSpace", async ({ space }) => {
     const user = connectedUsers.get(socket.id);
-    if (!user || user.isDM) return;
-    
-    const oldSpace = user.space;
-    socket.leave(oldSpace);
-    socket.join(space);
-    
+    if (!user) return;
+
+    socket.leave(user.space);
     user.space = space;
+    user.isDM = false;
     connectedUsers.set(socket.id, user);
-    
-    console.log(`🔄 ${user.nickname} cambió de ${oldSpace} a ${space}`);
-    
-    io.to(oldSpace).emit("spaceUsers", getUsersInSpace(oldSpace));
+
+    socket.join(space);
+    console.log(`🔄 ${user.nickname} cambió al espacio ${space}`);
+
     io.to(space).emit("spaceUsers", getUsersInSpace(space));
-    
-    try {
-      const history = await Message.find({ type: 'space', space })
-        .sort({ createdAt: 1 })
-        .lean();
-      
-      const historyWithTimestamp = history.map(msg => ({
-        ...msg,
-        timestamp: msg.createdAt || new Date().toISOString()
-      }));
-      
-      socket.emit("chatHistory", historyWithTimestamp);
-    } catch (e) {
-      console.error("❌ Error enviando historial:", e);
-    }
-    
-    socket.to(oldSpace).emit("userLeft", { nickname: user.nickname, timestamp: new Date().toISOString() });
-    socket.to(space).emit("userJoined", { nickname: user.nickname, timestamp: new Date().toISOString() });
+    io.emit("allUsers", getAllConnectedUsers());
+
+    const history = await Message.find({ type: "space", space }).sort({
+      createdAt: 1,
+    });
+    socket.emit("chatHistory", history);
   });
 
+  // ========================
+  // MENSAJES EN ESPACIOS
+  // ========================
+  socket.on("sendMessage", async ({ sender, content, image }) => {
+    const user = connectedUsers.get(socket.id);
+    if (!user) return;
+
+    let saved;
+    if (user.isDM) {
+      // MENSAJE DIRECTO
+      saved = await Message.create({
+        sender,
+        receiver: user.dmWith,
+        content,
+        image,
+        type: "dm",
+      });
+
+      const dmRoom = user.dmRoom;
+      io.to(dmRoom).emit("receiveDM", saved);
+    } else {
+      // MENSAJE EN ESPACIO
+      saved = await Message.create({
+        sender,
+        content,
+        image,
+        type: "space",
+        space: user.space,
+      });
+
+      io.to(user.space).emit("receiveMessage", saved);
+    }
+  });
+
+  // ========================
+  // MENSAJES DIRECTOS
+  // ========================
   socket.on("startDM", async ({ receiver }) => {
     const user = connectedUsers.get(socket.id);
     if (!user) return;
-    
-    const dmRoom = [user.nickname, receiver].sort().join('-');
-    
+
+    const dmRoom = [user.nickname, receiver].sort().join("-");
     socket.join(dmRoom);
+
     user.isDM = true;
     user.dmWith = receiver;
     user.dmRoom = dmRoom;
     connectedUsers.set(socket.id, user);
-    
-    console.log(`💬 DM iniciado entre ${user.nickname} y ${receiver}`);
-    
-    try {
-      const history = await Message.find({
-        type: 'dm',
-        $or: [
-          { sender: user.nickname, receiver },
-          { sender: receiver, receiver: user.nickname }
-        ]
-      }).sort({ createdAt: 1 }).lean();
-      
-      const historyWithTimestamp = history.map(msg => ({
-        ...msg,
-        timestamp: msg.createdAt || new Date().toISOString()
-      }));
-      
-      socket.emit("dmHistory", historyWithTimestamp);
-      console.log(`📦 Enviando ${history.length} mensajes DM`);
-    } catch (e) {
-      console.error("❌ Error enviando historial DM:", e);
-    }
+
+    const history = await Message.find({
+      type: "dm",
+      $or: [
+        { sender: user.nickname, receiver },
+        { sender: receiver, receiver: user.nickname },
+      ],
+    }).sort({ createdAt: 1 });
+
+    socket.emit("dmHistory", history);
   });
 
-  socket.on("closeDM", async ({ space = 'general' }) => {
+  socket.on("closeDM", async ({ space = "general" }) => {
     const user = connectedUsers.get(socket.id);
     if (!user) return;
-    
-    if (user.dmRoom) {
-      socket.leave(user.dmRoom);
-    }
-    
+
+    if (user.dmRoom) socket.leave(user.dmRoom);
     user.isDM = false;
     user.dmWith = null;
     user.dmRoom = null;
     user.space = space;
     connectedUsers.set(socket.id, user);
-    
     socket.join(space);
-    
-    console.log(`🔙 ${user.nickname} volvió al espacio ${space}`);
-    
-    try {
-      const history = await Message.find({ type: 'space', space })
-        .sort({ createdAt: 1 })
-        .lean();
-      
-      socket.emit("chatHistory", history.map(msg => ({
-        ...msg,
-        timestamp: msg.createdAt || new Date().toISOString()
-      })));
-    } catch (e) {
-      console.error("❌ Error:", e);
-    }
-    
-    io.to(space).emit("spaceUsers", getUsersInSpace(space));
+
+    const history = await Message.find({ type: "space", space }).sort({
+      createdAt: 1,
+    });
+    socket.emit("chatHistory", history);
   });
 
-  socket.on("sendMessage", async ({ sender, content, image }) => {
-    const user = connectedUsers.get(socket.id);
-    if (!user) return;
-    
-    try {
-      let saved;
-      
-      if (user.isDM) {
-        saved = await Message.create({
-          sender,
-          content: content || '',
-          type: 'dm',
-          receiver: user.dmWith,
-          image: image || undefined
-        });
-        
-        const dmRoom = user.dmRoom;
-        const messageToSend = {
-          ...saved.toObject(),
-          timestamp: saved.createdAt.toISOString()
-        };
-        
-        io.to(dmRoom).emit("receiveDM", messageToSend);
-        
-        connectedUsers.forEach((otherUser, otherSocketId) => {
-          if (otherUser.nickname === user.dmWith && !otherUser.isDM) {
-            io.to(otherSocketId).emit("newDMNotification", {
-              from: sender,
-              preview: content ? content.substring(0, 50) : '📷 Imagen'
-            });
-          }
-        });
-        
-        console.log(`💬 Mensaje DM de ${sender} a ${user.dmWith}`);
-      } else {
-        saved = await Message.create({
-          sender,
-          content: content || '',
-          type: 'space',
-          space: user.space,
-          image: image || undefined
-        });
-        
-        const messageToSend = {
-          ...saved.toObject(),
-          timestamp: saved.createdAt.toISOString()
-        };
-        
-        io.to(user.space).emit("receiveMessage", messageToSend);
-        console.log(`📨 Mensaje en espacio ${user.space} de ${sender}`);
-      }
-    } catch (e) {
-      console.error("❌ Error guardando mensaje:", e);
-    }
-  });
-
+  // ========================
+  // DESCONECTAR
+  // ========================
   socket.on("disconnect", () => {
     const user = connectedUsers.get(socket.id);
-    
     if (user) {
       console.log(`🔴 ${user.nickname} desconectado`);
       connectedUsers.delete(socket.id);
-      
-      if (!user.isDM) {
-        io.to(user.space).emit("spaceUsers", getUsersInSpace(user.space));
-        socket.to(user.space).emit("userLeft", { nickname: user.nickname, timestamp: new Date().toISOString() });
-      }
-      
+      io.to(user.space).emit("spaceUsers", getUsersInSpace(user.space));
       io.emit("allUsers", getAllConnectedUsers());
     }
   });
 });
 
+// ==========================================
+// SERVIDOR ACTIVO
+// ==========================================
 const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => {
-  console.log(`✅ Servidor activo en puerto ${PORT}`);
-  console.log(`🌐 CORS habilitado para: ${allowedOrigins.join(', ')}`);
-});
+server.listen(PORT, () =>
+  console.log(`✅ Servidor activo en puerto ${PORT}`)
+);
